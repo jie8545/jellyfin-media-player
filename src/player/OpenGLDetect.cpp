@@ -2,10 +2,10 @@
 #include <QSurfaceFormat>
 #include <QCoreApplication>
 #include <QOpenGLContext>
+#include <QDebug>
 
 #include <mpv/client.h>
 
-#include "QsLog.h"
 
 #include "QtHelper.h"
 #include "OpenGLDetect.h"
@@ -30,7 +30,7 @@ void detectOpenGLLate()
 {
 }
 
-#elif defined(Q_OS_LINUX)
+#elif defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Attempt to reuse mpv's code for detecting whether we want GLX or EGL (which
@@ -41,7 +41,6 @@ static QString probeHwdecInterop()
   auto mpv = mpv::qt::Handle::FromRawHandle(mpv_create());
   if (!mpv)
     return "";
-  mpv::qt::set_property(mpv, "hwdec-preload", "auto");
   // Actually creating a window is required. There is currently no way to keep
   // this window hidden or invisible.
   mpv::qt::set_property(mpv, "force-window", true);
@@ -87,7 +86,7 @@ void detectOpenGLLate()
   QList<int> versions = { 3, 2 };
   for (auto version : versions)
   {
-    QLOG_INFO() << "Trying GLES version" << version;
+    qInfo() << "Trying GLES version" << version;
     QSurfaceFormat fmt = QSurfaceFormat::defaultFormat();
     fmt.setMajorVersion(version);
 #ifdef HAVE_OPTIMALORIENTATION
@@ -97,7 +96,7 @@ void detectOpenGLLate()
     ctx.setFormat(fmt);
     if (ctx.create())
     {
-      QLOG_INFO() << "Using GLES version" << version;
+      qInfo() << "Using GLES version" << version;
       QSurfaceFormat::setDefaultFormat(fmt);
       break;
     }

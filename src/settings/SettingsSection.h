@@ -4,9 +4,9 @@
 #include <QObject>
 #include <QMap>
 #include <QVariant>
+#include <QDebug>
 #include "SettingsValue.h"
 #include "SettingsComponent.h"
-#include "QsLog.h"
 
 class SettingsSection : public QObject
 {
@@ -31,6 +31,7 @@ public:
 
   const QVariantMap allValues() const;
   const QVariantMap descriptions() const;
+  const QVariantMap sectionOrder() const;
 
   bool isValueHidden(const QString& key) const { return m_values[key]->isHidden(); }
   int orderIndex() const { return m_orderIndex; }

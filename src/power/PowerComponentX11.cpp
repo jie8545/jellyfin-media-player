@@ -1,7 +1,6 @@
 #include <stdlib.h>
 
 #include "PowerComponentX11.h"
-#include "QsLog.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 PowerComponentX11::PowerComponentX11() : PowerComponent(0)
@@ -20,7 +19,7 @@ void PowerComponentX11::onTimer()
     m_process->setProcessChannelMode(QProcess::ForwardedChannels);
     connect(m_process, (void (QProcess::*)(int,QProcess::ExitStatus))&QProcess::finished,
             this, &PowerComponentX11::onProcessFinished);
-    connect(m_process, (void (QProcess::*)(QProcess::ProcessError))&QProcess::error,
+    connect(m_process, (void (QProcess::*)(QProcess::ProcessError))&QProcess::errorOccurred,
             this, &PowerComponentX11::onProcessError);
     m_process->start("xdg-screensaver", {"reset"});
   }
@@ -37,7 +36,7 @@ void PowerComponentX11::onProcessFinished(int exitCode, QProcess::ExitStatus exi
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void PowerComponentX11::onProcessError(QProcess::ProcessError error)
 {
-  QLOG_ERROR() << "Disabling screensaver is not working. Make sure xdg-screensaver is installed.";
+  qCritical() << "Disabling screensaver is not working. Make sure xdg-screensaver is installed.";
   m_broken = true;
   onProcessFinished(-1, QProcess::CrashExit);
 }

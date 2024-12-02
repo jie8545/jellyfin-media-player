@@ -12,13 +12,12 @@
 #include <QUuid>
 #include <QFile>
 #include <QSaveFile>
+#include <QDebug>
 
 #include <mutex>
 
 #include "settings/SettingsComponent.h"
 #include "settings/SettingsSection.h"
-
-#include "QsLog.h"
 
 QList<QChar> httpSeparators = { '(', ')', '<', '>', '@', ',', ';', ':', '\\', '\"', '/', '[', ']', '?', '=', '{', '}', '\'' };
 
@@ -97,6 +96,8 @@ Platform Utils::CurrentPlatform()
   return PLATFORM_LINUX;
 #elif defined(Q_OS_WIN32)
   return PLATFORM_WINDOWS;
+#elif defined(Q_OS_FREEBSD)
+  return PLATFORM_FREEBSD;
 #else
   return PLATFORM_UNKNOWN;
 #endif

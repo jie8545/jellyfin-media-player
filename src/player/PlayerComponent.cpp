@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QDebug>
 #include "display/DisplayComponent.h"
 #include "settings/SettingsComponent.h"
 #include "system/SystemComponent.h"
@@ -14,8 +15,6 @@
 
 #include "PlayerQuickItem.h"
 #include "input/InputComponent.h"
-
-#include "QsLog.h"
 
 #include <math.h>
 #include <string.h>
@@ -116,9 +115,6 @@ bool PlayerComponent::componentInitialize()
   // Do not let the decoder downmix (better customization for us).
   mpv::qt::set_property(m_mpv, "ad-lavc-downmix", false);
 
-  // Make it load the hwdec interop, so hwdec can be enabled at runtime.
-  mpv::qt::set_property(m_mpv, "hwdec-preload", "auto");
-
   // User-visible application name used by some audio APIs (at least PulseAudio).
   mpv::qt::set_property(m_mpv, "audio-client-name", QCoreApplication::applicationName());
 
@@ -128,35 +124,42 @@ bool PlayerComponent::componentInitialize()
   // See: https://github.com/plexinc/plex-media-player/issues/736
   mpv::qt::set_property(m_mpv, "cache-seek-min", 5000);
 
+  // Disable ytdl
+  mpv::qt::set_property(m_mpv, "ytdl", false);
+
   if (SettingsComponent::Get().ignoreSSLErrors()) {
     mpv::qt::set_property(m_mpv, "tls-ca-file", "");
     mpv::qt::set_property(m_mpv, "tls-verify", "no");
   } else {
 #if !defined(Q_OS_WIN) && !defined(Q_OS_MAC)
-    QList<QByteArray> list;
-    list << "/etc/ssl/certs/ca-certificates.crt"
-        << "/etc/pki/tls/certs/ca-bundle.crt"
-        << "/usr/share/ssl/certs/ca-bundle.crt"
-        << "/usr/local/share/certs/ca-root-nss.crt"
-        << "/etc/ssl/cert.pem"
-        << "/usr/share/curl/curl-ca-bundle.crt"
-        << "/usr/local/share/curl/curl-ca-bundle.crt"
-        << "/var/lib/ca-certificates/ca-bundle.pem";
+    if (SettingsComponent::Get().autodetectCertBundle()) {
+      QList<QByteArray> list;
+      list << "/etc/ssl/certs/ca-certificates.crt"
+          << "/etc/pki/tls/certs/ca-bundle.crt"
+          << "/usr/share/ssl/certs/ca-bundle.crt"
+          << "/usr/local/share/certs/ca-root-nss.crt"
+          << "/etc/ssl/cert.pem"
+          << "/usr/share/curl/curl-ca-bundle.crt"
+          << "/usr/local/share/curl/curl-ca-bundle.crt"
+          << "/var/lib/ca-certificates/ca-bundle.pem";
 
-    bool success = false;
+      bool success = false;
 
-    for (auto path : list)
-    {
-      if (access(path.data(), R_OK) == 0) {
-        mpv::qt::set_property(m_mpv, "tls-ca-file", path.data());
-        mpv::qt::set_property(m_mpv, "tls-verify", "yes");
-        success = true;
-        break;
+      for (auto path : list)
+      {
+        if (access(path.data(), R_OK) == 0) {
+          mpv::qt::set_property(m_mpv, "tls-ca-file", path.data());
+          mpv::qt::set_property(m_mpv, "tls-verify", "yes");
+          success = true;
+          break;
+        }
       }
-    }
 
-    if (!success)
-      throw FatalException(tr("Failed to locate CA bundle."));
+      if (!success)
+        throw FatalException(tr("Failed to locate CA bundle."));
+    } else {
+      mpv::qt::set_property(m_mpv, "tls-verify", "yes");
+    }
 #else
     // We need to not use Shinchiro's personal CA file...
     mpv::qt::set_property(m_mpv, "tls-ca-file", "");
@@ -207,17 +210,21 @@ bool PlayerComponent::componentInitialize()
 
   updateAudioDeviceList();
   setAudioConfiguration();
-  updateSubtitleSettings();
-  updateVideoSettings();
-
-  connect(SettingsComponent::Get().getSection(SETTINGS_SECTION_VIDEO), &SettingsSection::valuesUpdated,
-          this, &PlayerComponent::updateVideoSettings);
-
-  connect(SettingsComponent::Get().getSection(SETTINGS_SECTION_SUBTITLES), &SettingsSection::valuesUpdated,
-          this, &PlayerComponent::updateSubtitleSettings);
+  setVideoConfiguration();
+  setSubtitleConfiguration();
+  setOtherConfiguration();
 
   connect(SettingsComponent::Get().getSection(SETTINGS_SECTION_AUDIO), &SettingsSection::valuesUpdated,
-          this, &PlayerComponent::setAudioConfiguration);
+          this, &PlayerComponent::updateAudioConfiguration);
+
+  connect(SettingsComponent::Get().getSection(SETTINGS_SECTION_VIDEO), &SettingsSection::valuesUpdated,
+          this, &PlayerComponent::updateVideoConfiguration);
+
+  connect(SettingsComponent::Get().getSection(SETTINGS_SECTION_SUBTITLES), &SettingsSection::valuesUpdated,
+          this, &PlayerComponent::updateSubtitleConfiguration);
+
+  connect(SettingsComponent::Get().getSection(SETTINGS_SECTION_OTHER), &SettingsSection::valuesUpdated,
+          this, &PlayerComponent::updateConfiguration);
 
   initializeCodecSupport();
   Codecs::initCodecs();
@@ -234,7 +241,7 @@ bool PlayerComponent::componentInitialize()
         codecInfo += "(enc)";
     }
   }
-  QLOG_INFO() << "Present codecs:" << qPrintable(codecInfo);
+  qInfo() << "Present codecs:" << qPrintable(codecInfo);
 
   connect(this, &PlayerComponent::onMpvEvents, this, &PlayerComponent::handleMpvEvents, Qt::QueuedConnection);
   emit onMpvEvents();
@@ -303,7 +310,7 @@ void PlayerComponent::queueMedia(const QString& url, const QVariantMap& options,
   m_mediaFrameRate = metadata["frameRate"].toFloat(); // returns 0 on failure
   m_serverMediaInfo = metadata["media"].toMap();
 
-  updateVideoSettings();
+  updateVideoConfiguration();
 
   QUrl qurl = url;
   QString host = qurl.host();
@@ -311,6 +318,10 @@ void PlayerComponent::queueMedia(const QString& url, const QVariantMap& options,
   QVariantList command;
   command << "loadfile" << qurl.toString(QUrl::FullyEncoded);
   command << "append-play"; // if nothing is playing, play it now, otherwise just enqueue it
+
+#if MPV_CLIENT_API_VERSION >= MPV_MAKE_VERSION(2, 3)
+  command << -1; // insert_at_idx
+#endif
 
   QVariantMap extraArgs;
 
@@ -354,11 +365,11 @@ void PlayerComponent::streamSwitch()
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 bool PlayerComponent::switchDisplayFrameRate()
 {
-  QLOG_DEBUG() << "Video framerate:" << m_mediaFrameRate << "fps";
+  qDebug() << "Video framerate:" << m_mediaFrameRate << "fps";
 
   if (!SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "refreshrate.auto_switch").toBool())
   {
-    QLOG_DEBUG() << "Not switching refresh-rate (disabled by settings).";
+    qDebug() << "Not switching refresh-rate (disabled by settings).";
     return false;
   }
 
@@ -368,13 +379,13 @@ bool PlayerComponent::switchDisplayFrameRate()
 #endif
   if (!fs)
   {
-    QLOG_DEBUG() << "Not switching refresh-rate (not in fullscreen mode).";
+    qDebug() << "Not switching refresh-rate (not in fullscreen mode).";
     return false;
   }
 
   if (m_mediaFrameRate < 1)
   {
-    QLOG_DEBUG() << "Not switching refresh-rate (no known video framerate).";
+    qDebug() << "Not switching refresh-rate (no known video framerate).";
     return false;
   }
 
@@ -385,12 +396,12 @@ bool PlayerComponent::switchDisplayFrameRate()
   DisplayComponent* display = &DisplayComponent::Get();
   if (!display->switchToBestVideoMode(m_mediaFrameRate))
   {
-    QLOG_DEBUG() << "Switching refresh-rate failed or unnecessary.";
+    qDebug() << "Switching refresh-rate failed or unnecessary.";
     return false;
   }
 
   // Make sure settings dependent on the display refresh rate are updated properly.
-  updateVideoSettings();
+  updateVideoConfiguration();
   return true;
 }
 
@@ -406,7 +417,7 @@ void PlayerComponent::onRestoreDisplay()
 void PlayerComponent::onRefreshRateChange()
 {
   // Make sure settings dependent on the display refresh rate are updated properly.
-  updateVideoSettings();
+  updateVideoConfiguration();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -446,29 +457,29 @@ void PlayerComponent::updatePlaybackState()
   {
     switch (newState) {
     case State::paused:
-      QLOG_INFO() << "Entering state: paused";
+      qInfo() << "Entering state: paused";
       emit paused();
       break;
     case State::playing:
-      QLOG_INFO() << "Entering state: playing";
+      qInfo() << "Entering state: playing";
       emit playing();
       break;
     case State::buffering:
-      QLOG_INFO() << "Entering state: buffering";
+      qInfo() << "Entering state: buffering";
       m_lastBufferingPercentage = -1; /* force update below */
       break;
     case State::finished:
-      QLOG_INFO() << "Entering state: finished";
+      qInfo() << "Entering state: finished";
       emit finished();
       emit stopped();
       break;
     case State::canceled:
-      QLOG_INFO() << "Entering state: canceled";
+      qInfo() << "Entering state: canceled";
       emit canceled();
       emit stopped();
       break;
     case State::error:
-      QLOG_INFO() << ("Entering state: error (" + m_playbackError + ")");
+      qInfo() << ("Entering state: error (" + m_playbackError + ")");
       emit error(m_playbackError);
       break;
     }
@@ -518,6 +529,10 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
           m_playbackCanceled = true;
           break;
         }
+        case MPV_END_FILE_REASON_EOF:
+        case MPV_END_FILE_REASON_QUIT:
+        case MPV_END_FILE_REASON_REDIRECT:
+          break;
       }
 
       if (!m_streamSwitchImminent)
@@ -582,13 +597,13 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
         len -= 1;
       QString logline = QString::fromUtf8(msg->prefix) + ": " + QString::fromUtf8(msg->text, (int)len);
       if (msg->log_level >= MPV_LOG_LEVEL_V)
-        QLOG_DEBUG() << qPrintable(logline);
+        qDebug() << qPrintable(logline);
       else if (msg->log_level >= MPV_LOG_LEVEL_INFO)
-        QLOG_INFO() << qPrintable(logline);
+        qInfo() << qPrintable(logline);
       else if (msg->log_level >= MPV_LOG_LEVEL_WARN)
-        QLOG_WARN() << qPrintable(logline);
+        qWarning() << qPrintable(logline);
       else
-        QLOG_ERROR() << qPrintable(logline);
+        qCritical() << qPrintable(logline);
       break;
     }
     case MPV_EVENT_CLIENT_MESSAGE:
@@ -604,9 +619,9 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
       {
         // Calling this lambda will instruct mpv to continue loading the file.
         auto resume = [=] {
-          QLOG_INFO() << "checking codecs";
+          qInfo() << "checking codecs";
           startCodecsLoading([=] {
-            QLOG_INFO() << "resuming loading";
+            qInfo() << "resuming loading";
             mpv::qt::command(m_mpv, QStringList() << "hook-ack" << resumeId);
           });
         };
@@ -617,7 +632,7 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
           // to various strange OS-related reasons.
           // (Better hope the user doesn't try to exit Konvergo during mode change.)
           int pause = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "refreshrate.delay").toInt() * 1000;
-          QLOG_INFO() << "waiting" << pause << "msec after rate switch before loading";
+          qInfo() << "waiting" << pause << "msec after rate switch before loading";
           QTimer::singleShot(pause, resume);
         }
         else
@@ -649,9 +664,9 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
       {
         // Calling this lambda will instruct mpv to continue loading the file.
         auto resume = [=] {
-          QLOG_INFO() << "checking codecs";
+          qInfo() << "checking codecs";
           startCodecsLoading([=] {
-            QLOG_INFO() << "resuming loading";
+            qInfo() << "resuming loading";
             mpv_hook_continue(m_mpv, id);
           });
         };
@@ -662,7 +677,7 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
           // to various strange OS-related reasons.
           // (Better hope the user doesn't try to exit Konvergo during mode change.)
           int pause = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "refreshrate.delay").toInt() * 1000;
-          QLOG_INFO() << "waiting" << pause << "msec after rate switch before loading";
+          qInfo() << "waiting" << pause << "msec after rate switch before loading";
           QTimer::singleShot(pause, resume);
         }
         else
@@ -873,20 +888,21 @@ void PlayerComponent::reselectStream(const QString &streamSelection, MediaType t
 
   QString selection = "no";
 
-  for (auto stream : findStreamsForURL(streamName))
+  if (!streamID.isEmpty())
   {
-    auto map = stream.toMap();
-
-    if (map["type"].toString() != mpvStreamTypeName)
-      continue;
-
-    if (!streamID.isEmpty() && map["ff-index"].toString() == streamID)
+    selection = streamID;
+  } else {
+    for (auto stream : findStreamsForURL(streamName))
     {
-      selection = map["id"].toString();
-      break;
-    } else if (streamID.isEmpty() && map["external-filename"].toString() == streamName) {
-      selection = map["id"].toString();
-      break;
+      auto map = stream.toMap();
+
+      if (map["type"].toString() != mpvStreamTypeName)
+      {
+        continue;
+      } else if (map["external-filename"].toString() == streamName) {
+        selection = map["id"].toString();
+        break;
+      }
     }
   }
 
@@ -972,9 +988,9 @@ void PlayerComponent::checkCurrentAudioDevice(const QSet<QString>& old_devs, con
   QSet<QString> removed = old_devs - new_devs;
   QSet<QString> added = new_devs - old_devs;
 
-  QLOG_DEBUG() << "Audio devices removed:" << removed;
-  QLOG_DEBUG() << "Audio devices added:" << added;
-  QLOG_DEBUG() << "Audio device selected:" << userDevice;
+  qDebug() << "Audio devices removed:" << removed;
+  qDebug() << "Audio devices added:" << added;
+  qDebug() << "Audio device selected:" << userDevice;
 
   if (userDevice.length())
   {
@@ -1039,11 +1055,18 @@ void PlayerComponent::updateAudioDevice()
 
   if (!m_audioDevices.contains(device))
   {
-    QLOG_WARN() << "Not using audio device" << device << "because it's not present.";
+    qWarning() << "Not using audio device" << device << "because it's not present.";
     device = "auto";
   }
 
   mpv::qt::set_property(m_mpv, "audio-device", device);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::updateAudioConfiguration()
+{
+  setAudioConfiguration();
+  setOtherConfiguration();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1055,14 +1078,11 @@ void PlayerComponent::setAudioConfiguration()
 
   updateAudioDevice();
 
-  QString resampleOpts = "";
   bool normalize = SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "normalize").toBool();
-  resampleOpts += QString(":normalize=") + (normalize ? "yes" : "no");
+  mpv::qt::set_property(m_mpv, "audio-normalize-downmix", normalize ? "yes" : "no");
 
   // Make downmix more similar to PHT.
-  resampleOpts += ":o=[surround_mix_level=1]";
-
-  mpv::qt::set_property(m_mpv, "af-defaults", "lavrresample" + resampleOpts);
+  mpv::qt::set_property(m_mpv, "audio-swresample-o", "surround_mix_level=1");
 
   m_passthroughCodecs.clear();
 
@@ -1116,7 +1136,7 @@ void PlayerComponent::setAudioConfiguration()
   }
   else
   {
-    mpv::qt::command(m_mpv, QStringList() << "af" << "del" << "@ac3");
+    mpv::qt::command(m_mpv, QStringList() << "af" << "remove" << "@ac3");
   }
 
   QVariant device = SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "device");
@@ -1129,21 +1149,65 @@ void PlayerComponent::setAudioConfiguration()
                                                                    layout.toString(),
                                                                    passthroughCodecs.isEmpty() ? "none" : passthroughCodecs,
                                                                    m_doAc3Transcoding ? "yes" : "no");
-  QLOG_INFO() << qPrintable(audioConfig);
+  qInfo() << qPrintable(audioConfig);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-void PlayerComponent::updateSubtitleSettings()
+void PlayerComponent::updateSubtitleConfiguration()
 {
-  QVariant size = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "size");
-  mpv::qt::set_property(m_mpv, "sub-scale", size.toInt() / 32.0);
+  setSubtitleConfiguration();
+  setOtherConfiguration();
+}
 
-  QVariant colorsString = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "color");
-  auto colors = colorsString.toString().split(",");
-  if (colors.length() == 2)
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::setSubtitleConfiguration()
+{
+  bool assScaleBorderAndShadow = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "ass_scale_border_and_shadow").toBool();
+  mpv::qt::set_property(m_mpv, "sub-ass-style-overrides", assScaleBorderAndShadow ? "ScaledBorderAndShadow=yes" : "ScaledBorderAndShadow=no");
+
+  QString assStyleOverride = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "ass_style_override").toString();
+  if (!assStyleOverride.isEmpty())
   {
-    mpv::qt::set_property(m_mpv, "sub-color", colors[0]);
-    mpv::qt::set_property(m_mpv, "sub-border-color", colors[1]);
+    mpv::qt::set_property(m_mpv, "sub-ass-override", assStyleOverride);
+  }
+
+  QVariant size = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "size");
+  if (size != -1)
+  {
+    mpv::qt::set_property(m_mpv, "sub-scale", size.toInt() / 32.0);
+  }
+
+  QString font = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "font").toString();
+  if (!font.isEmpty())
+  {
+    mpv::qt::set_property(m_mpv, "sub-font", font);
+  }
+
+  QString color = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "color").toString();
+  if (!color.isEmpty())
+  {
+    mpv::qt::set_property(m_mpv, "sub-color", color);
+  }
+
+  QString borderColor = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "border_color").toString();
+  if (!borderColor.isEmpty())
+  {
+    mpv::qt::set_property(m_mpv, "sub-border-color", borderColor);
+  }
+
+  QVariant borderSize = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "border_size");
+  if (borderSize != -1)
+  {
+    mpv::qt::set_property(m_mpv, "sub-border-size", borderSize.toInt());
+  }
+
+  QString backgroundColor = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "background_color").toString();
+  QString backgroundTransparency = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "background_transparency").toString();
+  if (!backgroundColor.isEmpty() && !backgroundTransparency.isEmpty())
+  {
+    // Color is #RRGGBB or #AARRGGBB, insert Alpha after # (at position 1)
+    backgroundColor.insert(1, backgroundTransparency);
+    mpv::qt::set_property(m_mpv, "sub-back-color", backgroundColor);
   }
 
   QVariant subposString = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "placement");
@@ -1197,13 +1261,20 @@ void PlayerComponent::updateVideoAspectSettings()
   }
 
   mpv::qt::set_property(m_mpv, "video-unscaled", disableScaling);
-  mpv::qt::set_property(m_mpv, "video-aspect", forceAspect);
+  mpv::qt::set_property(m_mpv, "video-aspect-override", forceAspect);
   mpv::qt::set_property(m_mpv, "keepaspect", keepAspect);
   mpv::qt::set_property(m_mpv, "panscan", panScan);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-void PlayerComponent::updateVideoSettings()
+void PlayerComponent::updateVideoConfiguration()
+{
+  setVideoConfiguration();
+  setOtherConfiguration();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::setVideoConfiguration()
 {
   if (!m_mpv)
     return;
@@ -1213,7 +1284,7 @@ void PlayerComponent::updateVideoSettings()
 
   QString hardwareDecodingMode = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "hardwareDecoding").toString();
   QString hwdecMode = "no";
-  QString hwdecVTFormat = "nv12";
+  QString hwdecVTFormat = "no";
   if (hardwareDecodingMode == "enabled")
     hwdecMode = "auto";
   else if (hardwareDecodingMode == "osx_compat")
@@ -1226,22 +1297,53 @@ void PlayerComponent::updateVideoSettings()
     hwdecMode = "auto-copy";
   }
   mpv::qt::set_property(m_mpv, "hwdec", hwdecMode);
-  mpv::qt::set_property(m_mpv, "videotoolbox-format", hwdecVTFormat);
+  mpv::qt::set_property(m_mpv, "hwdec-image-format", hwdecVTFormat);
 
   QVariant deinterlace = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "deinterlace");
   mpv::qt::set_property(m_mpv, "deinterlace", deinterlace.toBool() ? "yes" : "no");
 
 #ifndef TARGET_RPI
   double displayFps = DisplayComponent::Get().currentRefreshRate();
-  mpv::qt::set_property(m_mpv, "display-fps", displayFps);
+  mpv::qt::set_property(m_mpv, "display-fps-override", displayFps);
 #endif
 
   setAudioDelay(m_playbackAudioDelay);
 
   QVariant cache = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "cache");
-  mpv::qt::set_property(m_mpv, "cache", cache.toInt() * 1024);
+  mpv::qt::set_property(m_mpv, "demuxer-max-bytes", cache.toInt() * 1024 * 1024);
 
   updateVideoAspectSettings();
+  setOtherConfiguration();
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::setOtherConfiguration()
+{
+  QString otherConfiguration = SettingsComponent::Get().value(SETTINGS_SECTION_OTHER, "other_conf").toString();
+  qDebug() << "Parsing other configuration: "+otherConfiguration;
+  QStringList configurationList = otherConfiguration.split(QRegExp("[\r\n]"), Qt::SkipEmptyParts);
+
+  for(const QString& configuration : configurationList)
+  {
+    int splitIndex = configuration.indexOf("=");
+    int configurationLength = configuration.length();
+    if (splitIndex > 0 && splitIndex < configurationLength - 1)
+    {
+      QString configurationKey = configuration.left(splitIndex).remove(QRegExp("^([\"]+)")).remove(QRegExp("([\"]+)$")); 
+      QString configurationValue = configuration.right(configurationLength - splitIndex - 1).remove(QRegExp("^([\"]+)")).remove(QRegExp("([\"]+)$"));
+      mpv::qt::set_property(m_mpv, configurationKey, configurationValue);
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::updateConfiguration()
+{
+  setAudioConfiguration();
+  setVideoConfiguration();
+  setSubtitleConfiguration();
+  setOtherConfiguration();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -1266,7 +1368,7 @@ void PlayerComponent::initializeCodecSupport()
     ok = !!strstr(res, "=enabled");
 #endif
     m_codecSupport[name] = ok;
-    QLOG_INFO() << "Codec" << name << (ok ? "present" : "disabled");
+    qInfo() << "Codec" << name << (ok ? "present" : "disabled");
   }
 }
 
@@ -1385,7 +1487,7 @@ PlaybackInfo PlayerComponent::getPlaybackInfo()
           if (streamInfoMap["index"].toInt(&ok) == index && ok)
           {
             stream.profile = streamInfoMap["profile"].toString();
-            QLOG_DEBUG() << "h264profile:" << stream.profile;
+            qDebug() << "h264profile:" << stream.profile;
           }
         }
       }
@@ -1520,7 +1622,7 @@ QString PlayerComponent::videoInformation() const
                    << MPV_PROPERTY("video-params/dh") << "\n";
   info << "FPS (container): " << MPV_PROPERTY("container-fps") << "\n";
   info << "FPS (filters): " << MPV_PROPERTY("estimated-vf-fps") << "\n";
-  info << "Aspect: " << MPV_PROPERTY("video-aspect") << "\n";
+  info << "Aspect: " << MPV_PROPERTY("video-params/aspect") << "\n";
   info << "Bitrate: " << MPV_PROPERTY("video-bitrate") << "\n";
   double displayFps = DisplayComponent::Get().currentRefreshRate();
   info << "Display FPS: " << MPV_PROPERTY("display-fps")

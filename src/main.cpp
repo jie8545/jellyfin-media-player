@@ -8,10 +8,10 @@
 #include <QtWebEngine/qtwebengineglobal.h>
 #include <QErrorMessage>
 #include <QCommandLineOption>
+#include <QDebug>
 
 #include "shared/Names.h"
 #include "system/SystemComponent.h"
-#include "QsLog.h"
 #include "Paths.h"
 #include "player/CodecsComponent.h"
 #include "player/PlayerComponent.h"
@@ -30,7 +30,7 @@
 #include "PFMoveApplication.h"
 #endif
 
-#if defined(Q_OS_MAC) || defined(Q_OS_LINUX)
+#if defined(Q_OS_MAC) || defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)
 #include "SignalManager.h"
 #endif
 
@@ -100,17 +100,23 @@ int main(int argc, char *argv[])
                        {"windowed",                "Start in windowed mode"},
                        {"fullscreen",              "Start in fullscreen"},
                        {"terminal",                "Log to terminal"},
-                       {"disable-gpu",             "Disable QtWebEngine gpu accel"}});
+                       {"disable-gpu",             "Disable QtWebEngine gpu accel"},
+                       {"force-external-webclient","Use webclient provided by server"}});
 
     auto scaleOption = QCommandLineOption("scale-factor", "Set to a integer or default auto which controls" \
                                                           "the scale (DPI) of the desktop interface.");
     scaleOption.setValueName("scale");
     scaleOption.setDefaultValue("auto");
     
+    auto platformOption = QCommandLineOption("platform", "Equivalant to QT_QPA_PLATFORM.");
+    platformOption.setValueName("platform");
+    platformOption.setDefaultValue("default");
+
     auto devOption = QCommandLineOption("remote-debugging-port", "Port number for devtools.");
     devOption.setValueName("port");
     parser.addOption(scaleOption);
     parser.addOption(devOption);
+    parser.addOption(platformOption);
 
     char **newArgv = appendCommandLineArguments(argc, argv, g_qtFlags);
     int newArgc = argc + g_qtFlags.size();
@@ -155,6 +161,12 @@ int main(int argc, char *argv[])
     else if (scale != "none")
       qputenv("QT_SCALE_FACTOR", scale.toUtf8());
 
+    auto platform = parser.value("platform");
+    if (!(platform.isEmpty() || platform == "default"))
+    {
+      qputenv("QT_QPA_PLATFORM", platform.toUtf8());
+    }
+
     QApplication app(newArgc, newArgv);
     app.setApplicationName("Jellyfin Media Player");
 
@@ -163,9 +175,11 @@ int main(int argc, char *argv[])
     app.setWindowIcon(QIcon(":/images/icon.png"));
 #endif
 
-#if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)
   	// Set window icon on Linux using system icon theme
   	app.setWindowIcon(QIcon::fromTheme("com.github.iwalton3.jellyfin-media-player", QIcon(":/images/icon.png")));
+    // Set app id for Wayland compositor window icon
+    app.setDesktopFileName("com.github.iwalton3.jellyfin-media-player");
 #endif
 
 #if defined(Q_OS_MAC) && defined(NDEBUG)
@@ -240,7 +254,7 @@ int main(int argc, char *argv[])
   }
   catch (FatalException& e)
   {
-    QLOG_FATAL() << "Unhandled FatalException:" << qPrintable(e.message());
+    qFatal("Unhandled FatalException: %s", qPrintable(e.message()));
     QApplication errApp(argc, argv);
 
     auto  msg = new ErrorMessage(e.message(), true);

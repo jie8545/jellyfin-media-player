@@ -1,8 +1,8 @@
 Source: jellyfin-media-player
 Section: video
 Priority: optional
-Maintainer:  Ian Walton <ian@iwalton.com>, Joshua Boniface <joshua@boniface.me>
-Build-Depends: debhelper (>= 9),
+Maintainer:  Izzie Walton <izzie@iwalton.com>, Joshua Boniface <joshua@boniface.me>
+Build-Depends: debhelper (>= 10),
                autoconf,
                automake,
                libtool,
@@ -27,7 +27,7 @@ Build-Depends: debhelper (>= 9),
                libsdl2-dev,
                cmake,
                wget,
-               python,
+               python3,
                g++,
                qtwebengine5-dev,
                qtquickcontrols2-5-dev,
@@ -44,13 +44,9 @@ Vcs-Browser: https://github.org/jellyfin/jellyfin-media-player
 
 Package: jellyfin-media-player
 Architecture: any
-Depends: libmpv1,
-         libqt5webengine5,
-         libcec4 | libcec6,
+Depends: ${shlibs:Depends},
          qml-module-qtwebengine,
          qml-module-qtwebchannel,
-         qml-module-qtquick-controls,
-         libqt5x11extras5,
-         libqt5xml5
+         qml-module-qtquick-controls
 Description: Jellyfin is the Free Software Media System.
  This package provides the Jellyfin desktop media player.

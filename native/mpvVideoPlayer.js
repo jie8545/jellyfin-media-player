@@ -7,13 +7,15 @@
     }
 
     class mpvVideoPlayer {
-        constructor({ events, loading, appRouter, globalize, appHost, appSettings, toast }) {
+        constructor({ events, loading, appRouter, globalize, appHost, appSettings, confirm, dashboard }) {
             this.events = events;
             this.loading = loading;
             this.appRouter = appRouter;
             this.globalize = globalize;
             this.appHost = appHost;
             this.appSettings = appSettings;
+
+            this.setTransparency = dashboard.default.setBackdropTransparency.bind(dashboard);
 
             /**
              * @type {string}
@@ -34,7 +36,7 @@
              * @type {boolean}
              */
             this.isFetching = false;
-    
+
             /**
              * @type {HTMLDivElement | null | undefined}
              */
@@ -103,7 +105,7 @@
             /**
              * @type {float}
              */
-            this._playRate = 1;
+            this._playRate;
             /**
              * @type {boolean}
              */
@@ -150,13 +152,12 @@
                     const volume = this.getSavedVolume() * 100;
                     this.setVolume(volume, false);
 
-                    this.setPlaybackRate(1);
-                    this.setMute(false, false);
+                    this.setPlaybackRate(this.getPlaybackRate());
 
                     if (this._currentPlayOptions.fullscreen) {
                         this.appRouter.showVideoOsd().then(this.onNavigatedToOsd);
                     } else {
-                        this.appRouter.setTransparency('backdrop');
+                        this.setTransparency('backdrop');
                         this._videoDialog.dlg.style.zIndex = 'unset';
                     }
 
@@ -189,23 +190,33 @@
              * @private
              * @param e {Event} The event received from the `<video>` element
              */
-            this.onError = (error) => {
+            this.onError = async (error) => {
                 this.removeMediaDialog();
-                toast(`media error: ${error}`);
                 console.error(`media error: ${error}`);
 
-                this.events.trigger(this, 'error', [
-                    {
-                        type: 'mediadecodeerror',
+                const errorData = {
+                    type: 'mediadecodeerror'
+                };
+
+                try {
+                    await confirm({
+                        title: "Playback Failed",
+                        text: `Playback failed with error "${error}". Retry with transcode? (Note this may hang the player.)`,
+                        cancelText: "Cancel",
+                        confirmText: "Retry"
+                    });
+                } catch (ex) {
+                    // User declined retry
+                    errorData.streamInfo = {
                         // Prevent jellyfin-web retrying with transcode
                         // which crashes the player
-                        streamInfo: {
-                            mediaSource: {
-                                SupportsTranscoding: false
-                            }
+                        mediaSource: {
+                            SupportsTranscoding: false
                         }
-                    }
-                ]);
+                    };
+                }
+
+                this.events.trigger(this, 'error', [errorData]);
             };
 
             this.onDuration = (duration) => {
@@ -236,11 +247,44 @@
         /**
          * @private
          */
+        getRelativeIndexByType(mediaStreams, jellyIndex, streamType) {
+            let relIndex = 1;
+            for (const source of mediaStreams) {
+                if (source.Type != streamType || source.IsExternal) {
+                    continue;
+                }
+
+                if (source.Index == jellyIndex) {
+                    return relIndex;
+                }
+
+                relIndex += 1;
+            }
+
+            return null;
+        }
+
+        /**
+         * @private
+         */
+        getStreamByIndex(mediaStreams, jellyIndex) {
+            for (const source of mediaStreams) {
+                if (source.Index == jellyIndex) {
+                    return source;
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * @private
+         */
         getSubtitleParam() {
             const options = this._currentPlayOptions;
 
             if (this._subtitleTrackIndexToSetOnPlaying != null && this._subtitleTrackIndexToSetOnPlaying >= 0) {
-                const initialSubtitleStream = options.mediaSource.MediaStreams[this._subtitleTrackIndexToSetOnPlaying];
+                const initialSubtitleStream = this.getStreamByIndex(options.mediaSource.MediaStreams, this._subtitleTrackIndexToSetOnPlaying);
                 if (!initialSubtitleStream || initialSubtitleStream.DeliveryMethod === 'Encode') {
                     this._subtitleTrackIndexToSetOnPlaying = -1;
                 } else if (initialSubtitleStream.DeliveryMethod === 'External') {
@@ -252,7 +296,43 @@
                 return '';
             }
 
-            return '#' + this._subtitleTrackIndexToSetOnPlaying;
+            const subtitleRelIndex = this.getRelativeIndexByType(
+                options.mediaSource.MediaStreams,
+                this._subtitleTrackIndexToSetOnPlaying,
+                'Subtitle'
+            );
+
+            return subtitleRelIndex != null
+                ? '#' + subtitleRelIndex
+                : '';
+        }
+
+        /**
+         * @private
+         */
+        getAudioParam() {
+            const options = this._currentPlayOptions;
+
+            if (this._audioTrackIndexToSetOnPlaying != null && this._audioTrackIndexToSetOnPlaying >= 0) {
+                const initialAudioStream = this.getStreamByIndex(options.mediaSource.MediaStreams, this._audioTrackIndexToSetOnPlaying);
+                if (!initialAudioStream) {
+                    return '#1';
+                }
+            }
+
+            if (this._audioTrackIndexToSetOnPlaying == -1 || this._audioTrackIndexToSetOnPlaying == null) {
+                return '#1';
+            }
+
+            const audioRelIndex = this.getRelativeIndexByType(
+                options.mediaSource.MediaStreams,
+                this._audioTrackIndexToSetOnPlaying,
+                'Audio'
+            );
+
+            return audioRelIndex != null
+                ? '#' + audioRelIndex
+                : '#1';
         }
 
         tryGetFramerate(options) {
@@ -290,8 +370,7 @@
                 player.load(val,
                     { startMilliseconds: ms, autoplay: true },
                     streamdata,
-                    (this._audioTrackIndexToSetOnPlaying != null)
-                     ? '#' + this._audioTrackIndexToSetOnPlaying : '#1',
+                    this.getAudioParam(),
                     this.getSubtitleParam(),
                     resolve);
             });
@@ -357,7 +436,7 @@
                 return;
             }
 
-            window.api.player.setAudioStream(index != -1 ? '#' + index : '');
+            window.api.player.setAudioStream(this.getAudioParam());
         }
 
         onEndedInternal() {
@@ -389,7 +468,8 @@
             window.api.player.stop();
             window.api.power.setScreensaverEnabled(true);
 
-            this.appRouter.setTransparency('none');
+            this.setTransparency('none');
+
             document.body.classList.remove('hide-scroll');
 
             const dlg = this._videoDialog;
@@ -456,7 +536,7 @@
                     player.finished.connect(this.onEnded);
                     player.updateDuration.connect(this.onDuration);
                     player.error.connect(this.onError);
-                    player.paused.connect(this.onPause);    
+                    player.paused.connect(this.onPause);
                 }
 
                 if (options.fullscreen) {
@@ -503,7 +583,7 @@
      * @private
      */
     static getSupportedFeatures() {
-        return ['PlaybackRate'];
+        return ['PlaybackRate', 'SetAspectRatio'];
     }
 
     supports(feature) {
@@ -570,6 +650,7 @@
 
     pause() {
         window.api.player.pause();
+        window.api.power.setScreensaverEnabled(true);
     }
 
     // This is a retry after error
@@ -580,6 +661,7 @@
 
     unpause() {
         window.api.player.play();
+        window.api.power.setScreensaverEnabled(false);
     }
 
     paused() {
@@ -587,11 +669,21 @@
     }
 
     setPlaybackRate(value) {
-        this._playRate = value;
-        window.api.player.setPlaybackRate(value * 1000);
+        let playSpeed = +value; //this comes as a string from player force int for now
+        this._playRate = playSpeed;
+        window.api.player.setPlaybackRate(playSpeed * 1000);
     }
 
     getPlaybackRate() {
+        if(!this._playRate) //On startup grab default
+        {
+            let playRate = window.jmpInfo.settings.video.default_playback_speed;
+
+            if(!playRate) //fallback if default missing
+                playRate = 1;
+
+            this._playRate = playRate;
+        }
         return this._playRate;
     }
 
@@ -627,12 +719,15 @@
     }
 
     setVolume(val, save = true) {
-        this._volume = val;
-        if (save) {
-            this.saveVolume((val || 100) / 100);
-            this.events.trigger(this, 'volumechange');
+        val = Number(val);
+        if (!isNaN(val)) {
+            this._volume = val;
+            if (save) {
+                this.saveVolume(val / 100);
+                this.events.trigger(this, 'volumechange');
+            }
+            window.api.player.setVolume(val);
         }
-        window.api.player.setVolume(val);
     }
 
     getVolume() {
@@ -657,20 +752,6 @@
 
     isMuted() {
         return this._muted;
-    }
-
-    setAspectRatio() {
-    }
-
-    getAspectRatio() {
-        return this._currentAspectRatio || 'auto';
-    }
-
-    getSupportedAspectRatios() {
-        return [{
-            name: this.globalize.translate('Auto'),
-            id: 'auto'
-        }];
     }
 
     togglePictureInPicture() {
@@ -736,6 +817,37 @@
         return Promise.resolve({
             categories: categories
         });
+    }
+
+    getSupportedAspectRatios() {
+        const options = window.jmpInfo.settingsDescriptions.video.find(x => x.key == 'aspect').options;
+        const current = window.jmpInfo.settings.video.aspect;
+
+        const getOptionName = (option) => {
+            const canTranslate = {
+                'normal': 'Auto',
+                'zoom': 'AspectRatioCover',
+                'stretch': 'AspectRatioFill',
+            }
+            const name = option.replace('video.aspect.', '');
+            return canTranslate[name]
+                ? this.globalize.translate(canTranslate[name])
+                : name;
+        }
+
+        return options.map(x => ({
+            id: x.value,
+            name: getOptionName(x.title),
+            selected: x.value == current
+        }));
+    }
+
+    getAspectRatio() {
+        return window.jmpInfo.settings.video.aspect;
+    }
+
+    setAspectRatio(value) {
+        window.jmpInfo.settings.video.aspect = value;
     }
     }
 /* eslint-enable indent */
